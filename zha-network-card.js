@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.3.0";
+const CARD_VERSION = "1.4.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -210,6 +210,10 @@ class ZhaNetworkCard extends HTMLElement {
           top: 8px;
           font-size: 0.75em;
           color: var(--secondary-text-color);
+          background: var(--card-background-color, rgba(28,28,28,0.85));
+          padding: 2px 8px;
+          border-radius: 10px;
+          pointer-events: none;
         }
         .empty {
           display: flex;
@@ -587,72 +591,138 @@ class ZhaNetworkCard extends HTMLElement {
     this._draw();
   }
 
-  // Lightweight force-directed layout (Fruchterman-Reingold style), run for
-  // a fixed number of iterations once per data refresh - no continuous
-  // animation loop, which keeps this cheap on low-power hardware like the
-  // HA Green / a Pi.
+  // Radial tree layout: coordinator at the center, every other device placed
+  // on a ring whose radius is its Zigbee hop-distance (BFS depth) from the
+  // coordinator. Siblings split their parent's angular sector. This mirrors
+  // how the original zha-network-visualization-card looked (coordinator
+  // center, routers/end-devices radiating outward) and produces far fewer
+  // crossing lines than a general force-directed layout, since the strongest
+  // links naturally become the tree edges.
   _layout() {
     const nodes = this._nodes;
     const edges = this._edges;
     const width = Math.max(300, this._cssWidth || 600);
     const height = Math.max(200, this._cssHeight || 400);
-    const area = width * height;
-    const k = Math.sqrt(area / Math.max(1, nodes.length)) * 2.4;
+    const cx = width / 2;
+    const cy = height / 2;
 
-    // Deterministic-ish starting positions: coordinator centered, others on
-    // a circle, so the simulation converges to a stable, repeatable layout.
-    const coordinator = nodes.find((n) => n.kind === "coordinator");
-    const others = nodes.filter((n) => n.kind !== "coordinator");
-    if (coordinator) {
-      coordinator.x = width / 2;
-      coordinator.y = height / 2;
+    const coordinator =
+      nodes.find((n) => n.kind === "coordinator") || nodes[0];
+
+    // Adjacency list, strongest link first, used both to build the BFS tree
+    // and to prefer strong-LQI links as the "parent" connection.
+    const adjacency = new Map(nodes.map((n) => [n.id, []]));
+    for (const e of edges) {
+      adjacency.get(e.a.id)?.push({ node: e.b, lqi: e.lqi });
+      adjacency.get(e.b.id)?.push({ node: e.a, lqi: e.lqi });
     }
-    others.forEach((n, i) => {
-      const angle = (2 * Math.PI * i) / Math.max(1, others.length);
-      const radius = Math.min(width, height) * 0.35;
-      n.x = width / 2 + radius * Math.cos(angle);
-      n.y = height / 2 + radius * Math.sin(angle);
-    });
+    for (const list of adjacency.values()) {
+      list.sort((a, b) => b.lqi - a.lqi);
+    }
 
-    const iterations = 220;
-    for (let iter = 0; iter < iterations; iter++) {
+    const parent = new Map();
+    const depth = new Map();
+    const children = new Map(nodes.map((n) => [n.id, []]));
+    const visited = new Set();
+
+    const bfsFrom = (root) => {
+      const queue = [root];
+      visited.add(root.id);
+      depth.set(root.id, 0);
+      while (queue.length) {
+        const current = queue.shift();
+        for (const { node: nb } of adjacency.get(current.id) || []) {
+          if (visited.has(nb.id)) continue;
+          visited.add(nb.id);
+          parent.set(nb.id, current.id);
+          depth.set(nb.id, depth.get(current.id) + 1);
+          children.get(current.id).push(nb);
+          queue.push(nb);
+        }
+      }
+    };
+
+    bfsFrom(coordinator);
+    // Any devices not reachable from the coordinator (no recorded neighbor
+    // path yet, e.g. right after pairing) get attached as virtual children
+    // of the coordinator so they still get a sensible ring position.
+    for (const n of nodes) {
+      if (!visited.has(n.id)) {
+        visited.add(n.id);
+        depth.set(n.id, 1);
+        parent.set(n.id, coordinator.id);
+        children.get(coordinator.id).push(n);
+      }
+    }
+
+    const maxDepth = Math.max(1, ...Array.from(depth.values()));
+    const ringGap = (Math.min(width, height) * 0.42) / maxDepth;
+
+    // Subtree leaf-count, used to proportionally divide angular space.
+    const leafCount = new Map();
+    const countLeaves = (node) => {
+      const kids = children.get(node.id);
+      if (!kids.length) {
+        leafCount.set(node.id, 1);
+        return 1;
+      }
+      let sum = 0;
+      for (const c of kids) sum += countLeaves(c);
+      leafCount.set(node.id, sum);
+      return sum;
+    };
+    countLeaves(coordinator);
+
+    coordinator.x = cx;
+    coordinator.y = cy;
+    coordinator.angle = 0;
+
+    const place = (node, angleStart, angleEnd) => {
+      const kids = children.get(node.id);
+      if (!kids.length) return;
+      let cursor = angleStart;
+      const span = angleEnd - angleStart;
+      const total = leafCount.get(node.id) || 1;
+      for (const child of kids) {
+        const portion = (leafCount.get(child.id) || 1) / total;
+        const childStart = cursor;
+        const childEnd = cursor + span * portion;
+        const angle = (childStart + childEnd) / 2;
+        const r = depth.get(child.id) * ringGap;
+        child.x = cx + r * Math.cos(angle);
+        child.y = cy + r * Math.sin(angle);
+        child.angle = angle;
+        place(child, childStart, childEnd);
+        cursor = childEnd;
+      }
+    };
+    place(coordinator, 0, Math.PI * 2);
+
+    // Light relaxation pass: small, capped node movements that resolve
+    // local crowding without unraveling the radial ordering established
+    // above (unlike a full force-directed simulation).
+    const k = Math.sqrt((width * height) / Math.max(1, nodes.length)) * 0.9;
+    for (let iter = 0; iter < 60; iter++) {
       for (const n of nodes) { n.fx = 0; n.fy = 0; }
-
-      // Repulsion between all node pairs
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const a = nodes[i], b = nodes[j];
           let dx = a.x - b.x, dy = a.y - b.y;
           let dist = Math.hypot(dx, dy) || 0.01;
-          const force = (k * k) / dist;
+          if (dist > k * 1.5) continue; // only nearby nodes interact
+          const force = (k * k) / (dist * dist);
           dx /= dist; dy /= dist;
           a.fx += dx * force; a.fy += dy * force;
           b.fx -= dx * force; b.fy -= dy * force;
         }
       }
-
-      // Attraction along edges
-      for (const e of edges) {
-        let dx = e.a.x - e.b.x, dy = e.a.y - e.b.y;
-        let dist = Math.hypot(dx, dy) || 0.01;
-        const force = (dist * dist) / k;
-        dx /= dist; dy /= dist;
-        e.a.fx -= dx * force; e.a.fy -= dy * force;
-        e.b.fx += dx * force; e.b.fy += dy * force;
-      }
-
-      // Mild centering pull so isolated sub-graphs don't drift off-canvas
+      const cap = 2.5;
       for (const n of nodes) {
-        n.fx += (width / 2 - n.x) * 0.01;
-        n.fy += (height / 2 - n.y) * 0.01;
-      }
-
-      const temp = Math.max(1, k * (1 - iter / iterations));
-      for (const n of nodes) {
-        if (n.kind === "coordinator") continue; // keep coordinator anchored
+        if (n === coordinator) continue;
         const disp = Math.hypot(n.fx, n.fy) || 0.01;
-        n.x += (n.fx / disp) * Math.min(disp, temp);
-        n.y += (n.fy / disp) * Math.min(disp, temp);
+        const move = Math.min(disp, cap);
+        n.x += (n.fx / disp) * move;
+        n.y += (n.fy / disp) * move;
         n.x = Math.min(width - n.r - 4, Math.max(n.r + 4, n.x));
         n.y = Math.min(height - n.r - 4, Math.max(n.r + 4, n.y));
       }
