@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.5.0";
+const CARD_VERSION = "1.6.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -561,8 +561,16 @@ class ZhaNetworkCard extends HTMLElement {
     }
 
     const edgeKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
-    const edgeMap = new Map();
 
+    // LQI lookup table built from the heard-neighbor table (Mgmt_Lqi). The
+    // routing table itself carries no LQI, so we use this purely for edge
+    // coloring once we know which pairs are actually linked.
+    const neighborLqi = new Map();
+    const nwkToNode = new Map();
+    for (const device of devices) {
+      const node = nodeById.get(device.ieee);
+      if (node) nwkToNode.set(String(device.nwk), node);
+    }
     for (const device of devices) {
       const fromNode = nodeById.get(device.ieee);
       if (!fromNode) continue;
@@ -571,9 +579,62 @@ class ZhaNetworkCard extends HTMLElement {
         if (!toNode || toNode === fromNode) continue;
         const key = edgeKey(fromNode.id, toNode.id);
         const lqi = Number(neighbor.lqi) || 0;
-        const existing = edgeMap.get(key);
-        if (!existing || lqi > existing.lqi) {
-          edgeMap.set(key, { a: fromNode, b: toNode, lqi });
+        const existing = neighborLqi.get(key);
+        if (existing === undefined || lqi > existing) neighborLqi.set(key, lqi);
+      }
+    }
+
+    const edgeMap = new Map();
+    const addEdge = (fromNode, toNode) => {
+      if (!toNode || toNode === fromNode) return;
+      const key = edgeKey(fromNode.id, toNode.id);
+      if (edgeMap.has(key)) return;
+      edgeMap.set(key, { a: fromNode, b: toNode, lqi: neighborLqi.get(key) ?? 0 });
+    };
+
+    const linkMode = this._config.link_mode === "neighbors" ? "neighbors" : "routes";
+
+    if (linkMode === "neighbors") {
+      // Legacy mode: every heard neighbor relationship, not just the
+      // currently active route. Much busier, but useful for spotting
+      // alternative/backup paths.
+      for (const [key, lqi] of neighborLqi) {
+        const [idA, idB] = key.split("|");
+        const a = nodeById.get(idA), b = nodeById.get(idB);
+        if (a && b) edgeMap.set(key, { a, b, lqi });
+      }
+    } else {
+      // Default mode: only the path each device actually currently routes
+      // through (its "uplink" next hop), taken from the ZHA routing table.
+      // This is what real traffic uses, vs. every device the radio can
+      // merely hear.
+      for (const device of devices) {
+        const fromNode = nodeById.get(device.ieee);
+        if (!fromNode || fromNode.kind === "coordinator") continue;
+        const activeRoutes = (device.routes || []).filter(
+          (r) => (r.route_status || "").toUpperCase() === "ACTIVE"
+        );
+        let linked = false;
+        for (const route of activeRoutes) {
+          const nextHopNode = nwkToNode.get(String(route.next_hop));
+          if (nextHopNode && nextHopNode !== fromNode) {
+            addEdge(fromNode, nextHopNode);
+            linked = true;
+            break; // one uplink edge per device is enough to show its path
+          }
+        }
+        if (!linked) {
+          // No active route yet (e.g. just paired) - fall back to the
+          // strongest heard neighbor so the device isn't left floating
+          // disconnected in the layout.
+          let best = null, bestLqi = -1;
+          for (const neighbor of device.neighbors || []) {
+            const toNode = nodeById.get(neighbor.ieee);
+            if (!toNode || toNode === fromNode) continue;
+            const lqi = Number(neighbor.lqi) || 0;
+            if (lqi > bestLqi) { best = toNode; bestLqi = lqi; }
+          }
+          if (best) addEdge(fromNode, best);
         }
       }
     }

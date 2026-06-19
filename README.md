@@ -41,8 +41,14 @@ title: ZHA Netzwerk
 refresh_interval: 60      # Sekunden, 0 = kein Auto-Refresh
 rescan_on_load: false     # true = bei jedem Laden sofort neu scannen
 show_end_devices: true    # false = nur Koordinator + Router anzeigen
-height: 480                # Höhe der Karte in px
+height: 560                # Höhe der Karte in px
+link_mode: routes          # "routes" (Standard) = nur aktive Routing-Pfade
+                            # "neighbors" = alle gehörten Nachbarn (mehr Linien)
 ```
+
+**Zu `link_mode`:**
+- `routes` (Standard): zeigt pro Gerät nur die Verbindung, über die es laut ZHA-Routingtabelle tatsächlich aktuell sendet (`next_hop`). Deutlich übersichtlicher, entspricht dem real genutzten Pfad.
+- `neighbors`: zeigt jede gehörte Nachbarschaftsbeziehung (Mgmt_Lqi-Tabelle) – nützlich, um mögliche Ausweich-/Backup-Pfade zu sehen, aber unübersichtlicher.
 
 ## Voraussetzungen
 
