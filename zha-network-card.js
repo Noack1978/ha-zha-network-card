@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.6.2";
+const CARD_VERSION = "1.7.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -261,6 +261,8 @@ class ZhaNetworkCard extends HTMLElement {
             <span><span class="dot" style="background:#2fb350"></span> LQI &gt; ${LQI_GREEN}</span>
             <span><span class="dot" style="background:#d8a300"></span> LQI ${LQI_YELLOW}-${LQI_GREEN}</span>
             <span><span class="dot" style="background:#d8453a"></span> LQI &lt; ${LQI_YELLOW}</span>
+            <span><span class="line" style="background:#888"></span> aktive Route</span>
+            <span><span class="line" style="background:#444; opacity:0.5"></span> bekannter Nachbar</span>
           </div>
         </div>
       </ha-card>
@@ -505,7 +507,10 @@ class ZhaNetworkCard extends HTMLElement {
       ]);
       this._buildGraph(devices || [], friendlyNames);
       this._lastFetch = Date.now();
-      this._setStatus(`Aktualisiert: ${new Date().toLocaleTimeString()}`);
+      const activeCount = this._edges.filter((e) => e.active).length;
+      this._setStatus(
+        `Aktualisiert: ${new Date().toLocaleTimeString()} · ${this._nodes.length} Geräte, ${activeCount} aktive / ${this._edges.length} bekannte Verbindungen`
+      );
     } catch (err) {
       console.error("zha-network-card: failed to load ZHA data", err);
       this._setStatus("Fehler beim Laden der ZHA-Daten (Admin-Rechte erforderlich)");
@@ -578,15 +583,17 @@ class ZhaNetworkCard extends HTMLElement {
 
     const edgeKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
-    // LQI lookup table built from the heard-neighbor table (Mgmt_Lqi). The
-    // routing table itself carries no LQI, so we use this purely for edge
-    // coloring once we know which pairs are actually linked.
-    const neighborLqi = new Map();
+    // Build the full neighbor graph first (every heard relationship, from
+    // either side) - this is the reliable baseline that always has good
+    // coverage, since most ZHA networks have neighbor/Mgmt_Lqi data for
+    // far more device pairs than they have populated routing-table entries.
     const nwkToNode = new Map();
     for (const device of devices) {
       const node = nodeById.get(device.ieee);
       if (node) nwkToNode.set(normalizeNwk(device.nwk), node);
     }
+
+    const edgeMap = new Map();
     for (const device of devices) {
       const fromNode = nodeById.get(device.ieee);
       if (!fromNode) continue;
@@ -595,69 +602,46 @@ class ZhaNetworkCard extends HTMLElement {
         if (!toNode || toNode === fromNode) continue;
         const key = edgeKey(fromNode.id, toNode.id);
         const lqi = Number(neighbor.lqi) || 0;
-        const existing = neighborLqi.get(key);
-        if (existing === undefined || lqi > existing) neighborLqi.set(key, lqi);
+        const existing = edgeMap.get(key);
+        if (!existing || lqi > existing.lqi) {
+          edgeMap.set(key, { a: fromNode, b: toNode, lqi, active: false });
+        }
       }
     }
 
-    const edgeMap = new Map();
-    const addEdge = (fromNode, toNode) => {
-      if (!toNode || toNode === fromNode) return;
-      const key = edgeKey(fromNode.id, toNode.id);
-      if (edgeMap.has(key)) return;
-      edgeMap.set(key, { a: fromNode, b: toNode, lqi: neighborLqi.get(key) ?? 0 });
-    };
-
+    // Now mark, for each device, which single neighbor edge corresponds to
+    // its actual currently-active uplink route (from the ZHA routing
+    // table). That edge gets drawn bold/colored; everything else stays as
+    // a faint "heard but currently unused" link - so we highlight the real
+    // traffic path without ever hiding/losing a known connection.
     const linkMode = this._config.link_mode === "neighbors" ? "neighbors" : "routes";
-
-    if (linkMode === "neighbors") {
-      // Legacy mode: every heard neighbor relationship, not just the
-      // currently active route. Much busier, but useful for spotting
-      // alternative/backup paths.
-      for (const [key, lqi] of neighborLqi) {
-        const [idA, idB] = key.split("|");
-        const a = nodeById.get(idA), b = nodeById.get(idB);
-        if (a && b) edgeMap.set(key, { a, b, lqi });
-      }
-    } else {
-      // Default mode: only the path each device actually currently routes
-      // through (its "uplink" next hop), taken from the ZHA routing table.
-      // This is what real traffic uses, vs. every device the radio can
-      // merely hear.
+    if (linkMode === "routes") {
       for (const device of devices) {
         const fromNode = nodeById.get(device.ieee);
         if (!fromNode || fromNode.kind === "coordinator") continue;
         const activeRoutes = (device.routes || []).filter(
           (r) => (r.route_status || "").toUpperCase() === "ACTIVE"
         );
-        let linked = false;
         for (const route of activeRoutes) {
           const nextHopNode = nwkToNode.get(normalizeNwk(route.next_hop));
-          if (nextHopNode && nextHopNode !== fromNode) {
-            addEdge(fromNode, nextHopNode);
-            linked = true;
-            break; // one uplink edge per device is enough to show its path
+          if (!nextHopNode || nextHopNode === fromNode) continue;
+          const key = edgeKey(fromNode.id, nextHopNode.id);
+          const edge = edgeMap.get(key);
+          if (edge) {
+            edge.active = true;
+          } else {
+            // We know the active next-hop but it wasn't in the neighbor
+            // table (can happen) - add it explicitly so the real path is
+            // still visible.
+            edgeMap.set(key, { a: fromNode, b: nextHopNode, lqi: 0, active: true });
           }
-        }
-        if (!linked) {
-          // No active route yet (e.g. just paired, or this is a sleepy end
-          // device whose own neighbor table is empty since it's rarely
-          // awake to be queried directly) - fall back to the strongest
-          // known neighbor link for this device from *any* direction
-          // (i.e. including cases where only its parent router reported
-          // the relationship), so it isn't left floating disconnected.
-          let best = null, bestLqi = -1;
-          for (const [key, lqi] of neighborLqi) {
-            const [idA, idB] = key.split("|");
-            if (idA !== fromNode.id && idB !== fromNode.id) continue;
-            const otherId = idA === fromNode.id ? idB : idA;
-            const toNode = nodeById.get(otherId);
-            if (!toNode || toNode === fromNode) continue;
-            if (lqi > bestLqi) { best = toNode; bestLqi = lqi; }
-          }
-          if (best) addEdge(fromNode, best);
+          break; // one uplink is enough to mark per device
         }
       }
+    } else {
+      // Legacy "neighbors" mode: treat every heard relationship as equally
+      // important/active (busier, but shows every possible path).
+      for (const edge of edgeMap.values()) edge.active = true;
     }
 
     this._nodes = nodes;
@@ -882,16 +866,32 @@ class ZhaNetworkCard extends HTMLElement {
     const NODE_FONT_PX = 11;
     const EDGE_FONT_PX = 9;
 
-    // edges
-    ctx.lineWidth = 1.5;
+    // edges - inactive (heard but not currently routed-through) edges first,
+    // drawn faint so they don't dominate, followed by the active routes on
+    // top in full color so the real traffic path stands out clearly.
     for (const e of this._edges) {
+      if (e.active) continue;
+      const a = toScreen(e.a.x, e.a.y);
+      const b = toScreen(e.b.x, e.b.y);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = "#666";
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.25;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.lineWidth = 2;
+    for (const e of this._edges) {
+      if (!e.active) continue;
       const a = toScreen(e.a.x, e.a.y);
       const b = toScreen(e.b.x, e.b.y);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.strokeStyle = lqiColor(e.lqi);
-      ctx.globalAlpha = 0.85;
+      ctx.globalAlpha = 0.9;
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
@@ -899,6 +899,7 @@ class ZhaNetworkCard extends HTMLElement {
     ctx.font = `${EDGE_FONT_PX}px sans-serif`;
     ctx.textAlign = "center";
     for (const e of this._edges) {
+      if (!e.active || !e.lqi) continue; // skip labels on faint/unknown-LQI edges
       const a = toScreen(e.a.x, e.a.y);
       const b = toScreen(e.b.x, e.b.y);
       const mx = (a.x + b.x) / 2;
