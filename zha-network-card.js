@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.1.1";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -35,30 +35,6 @@ function deviceKind(device) {
   return (device.power_source || "").toLowerCase().includes("mains")
     ? "router"
     : "end_device";
-}
-
-// The ZHA websocket payload only exposes the raw zigpy device name (often a
-// cryptic manufacturer string like "_TZ3000_gjnozsaz"). The actual,
-// user-assigned friendly name lives in HA's device registry, which we can
-// reach by hopping from one of the device's entities to its registry entry.
-// hass.devices / hass.entities are populated by the dashboard shell for any
-// Lovelace card that needs them, so no extra subscription is required.
-function resolveFriendlyName(hass, device) {
-  try {
-    const entities = device.entities || [];
-    for (const ent of entities) {
-      const entityId = ent.entity_id || ent.ha_entity_id;
-      if (!entityId) continue;
-      const entReg = hass?.entities?.[entityId];
-      const deviceId = entReg?.device_id;
-      const dev = deviceId ? hass?.devices?.[deviceId] : null;
-      const name = dev?.name_by_user || dev?.name;
-      if (name) return name;
-    }
-  } catch (err) {
-    // Best-effort only - fall through to the ZHA device name below.
-  }
-  return null;
 }
 
 class ZhaNetworkCard extends HTMLElement {
@@ -430,8 +406,11 @@ class ZhaNetworkCard extends HTMLElement {
         // gathered neighbor/route tables are populated.
         await new Promise((resolve) => setTimeout(resolve, 5000));
       }
-      const devices = await this._hass.callWS({ type: "zha/devices" });
-      this._buildGraph(devices || []);
+      const [devices, friendlyNames] = await Promise.all([
+        this._hass.callWS({ type: "zha/devices" }),
+        this._fetchFriendlyNameMap(),
+      ]);
+      this._buildGraph(devices || [], friendlyNames);
       this._lastFetch = Date.now();
       this._setStatus(`Aktualisiert: ${new Date().toLocaleTimeString()}`);
     } catch (err) {
@@ -440,15 +419,51 @@ class ZhaNetworkCard extends HTMLElement {
     }
   }
 
+  // Builds a map of entity_id -> friendly device name by explicitly querying
+  // HA's device and entity registries over the websocket API. We do this
+  // ourselves rather than relying on hass.devices/hass.entities, since those
+  // dictionaries are only populated once *something else* in the frontend
+  // has subscribed to the registries - not guaranteed for a standalone card.
+  async _fetchFriendlyNameMap() {
+    try {
+      const [devices, entities] = await Promise.all([
+        this._hass.callWS({ type: "config/device_registry/list" }),
+        this._hass.callWS({ type: "config/entity_registry/list" }),
+      ]);
+      const deviceNameById = new Map();
+      for (const dev of devices || []) {
+        const name = dev.name_by_user || dev.name;
+        if (name) deviceNameById.set(dev.id, name);
+      }
+      const nameByEntityId = new Map();
+      for (const ent of entities || []) {
+        const name = deviceNameById.get(ent.device_id);
+        if (name) nameByEntityId.set(ent.entity_id, name);
+      }
+      return nameByEntityId;
+    } catch (err) {
+      console.warn("zha-network-card: could not load device/entity registry for friendly names", err);
+      return new Map();
+    }
+  }
+
   _setStatus(text) {
     if (this._statusEl) this._statusEl.textContent = text;
   }
 
-  _buildGraph(devices) {
+  _buildGraph(devices, friendlyNames) {
     const showEnd = this._config.show_end_devices;
-    const byIeee = new Map(devices.map((d) => [d.ieee, d]));
     const nodes = [];
     const nodeById = new Map();
+
+    const resolveName = (device) => {
+      for (const ent of device.entities || []) {
+        const entityId = ent.entity_id || ent.ha_entity_id;
+        const name = entityId && friendlyNames ? friendlyNames.get(entityId) : null;
+        if (name) return name;
+      }
+      return null;
+    };
 
     for (const device of devices) {
       const kind = deviceKind(device);
@@ -457,7 +472,7 @@ class ZhaNetworkCard extends HTMLElement {
         id: device.ieee,
         device,
         kind,
-        displayName: resolveFriendlyName(this._hass, device) || device.name || device.ieee,
+        displayName: resolveName(device) || device.name || device.ieee,
         x: 0,
         y: 0,
         vx: 0,
