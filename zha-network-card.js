@@ -583,10 +583,6 @@ class ZhaNetworkCard extends HTMLElement {
     ctx.restore();
   }
 
-  static getConfigElement() {
-    return null;
-  }
-
   static getStubConfig() {
     return { title: "ZHA Netzwerk", refresh_interval: 60 };
   }
