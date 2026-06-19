@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.6.1";
+const CARD_VERSION = "1.6.2";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -640,14 +640,19 @@ class ZhaNetworkCard extends HTMLElement {
           }
         }
         if (!linked) {
-          // No active route yet (e.g. just paired) - fall back to the
-          // strongest heard neighbor so the device isn't left floating
-          // disconnected in the layout.
+          // No active route yet (e.g. just paired, or this is a sleepy end
+          // device whose own neighbor table is empty since it's rarely
+          // awake to be queried directly) - fall back to the strongest
+          // known neighbor link for this device from *any* direction
+          // (i.e. including cases where only its parent router reported
+          // the relationship), so it isn't left floating disconnected.
           let best = null, bestLqi = -1;
-          for (const neighbor of device.neighbors || []) {
-            const toNode = nodeById.get(neighbor.ieee);
+          for (const [key, lqi] of neighborLqi) {
+            const [idA, idB] = key.split("|");
+            if (idA !== fromNode.id && idB !== fromNode.id) continue;
+            const otherId = idA === fromNode.id ? idB : idA;
+            const toNode = nodeById.get(otherId);
             if (!toNode || toNode === fromNode) continue;
-            const lqi = Number(neighbor.lqi) || 0;
             if (lqi > bestLqi) { best = toNode; bestLqi = lqi; }
           }
           if (best) addEdge(fromNode, best);
