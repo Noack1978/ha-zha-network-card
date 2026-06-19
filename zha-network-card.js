@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.0.2";
+const CARD_VERSION = "1.1.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -35,6 +35,30 @@ function deviceKind(device) {
   return (device.power_source || "").toLowerCase().includes("mains")
     ? "router"
     : "end_device";
+}
+
+// The ZHA websocket payload only exposes the raw zigpy device name (often a
+// cryptic manufacturer string like "_TZ3000_gjnozsaz"). The actual,
+// user-assigned friendly name lives in HA's device registry, which we can
+// reach by hopping from one of the device's entities to its registry entry.
+// hass.devices / hass.entities are populated by the dashboard shell for any
+// Lovelace card that needs them, so no extra subscription is required.
+function resolveFriendlyName(hass, device) {
+  try {
+    const entities = device.entities || [];
+    for (const ent of entities) {
+      const entityId = ent.entity_id || ent.ha_entity_id;
+      if (!entityId) continue;
+      const entReg = hass?.entities?.[entityId];
+      const deviceId = entReg?.device_id;
+      const dev = deviceId ? hass?.devices?.[deviceId] : null;
+      const name = dev?.name_by_user || dev?.name;
+      if (name) return name;
+    }
+  } catch (err) {
+    // Best-effort only - fall through to the ZHA device name below.
+  }
+  return null;
 }
 
 class ZhaNetworkCard extends HTMLElement {
@@ -380,8 +404,11 @@ class ZhaNetworkCard extends HTMLElement {
       ["Online", d.available ? "Ja" : "Nein"],
       ["Zuletzt gesehen", d.last_seen || "—"],
     ];
+    const technicalName = d.name || d.ieee;
+    const showTechnical = node.displayName && node.displayName !== technicalName;
     this._infoEl.innerHTML =
-      `<div class="name">${d.name || d.ieee}</div>` +
+      `<div class="name">${node.displayName || technicalName}</div>` +
+      (showTechnical ? `<div class="row"><b>ZHA-Name</b><span>${technicalName}</span></div>` : "") +
       lines.map(([k, v]) => `<div class="row"><b>${k}</b><span>${v}</span></div>`).join("");
     this._infoBox.classList.add("visible");
   }
@@ -430,6 +457,7 @@ class ZhaNetworkCard extends HTMLElement {
         id: device.ieee,
         device,
         kind,
+        displayName: resolveFriendlyName(this._hass, device) || device.name || device.ieee,
         x: 0,
         y: 0,
         vx: 0,
@@ -630,7 +658,7 @@ class ZhaNetworkCard extends HTMLElement {
         ctx.fillStyle = "rgba(230,230,230,0.95)";
         ctx.font = "10px sans-serif";
         ctx.textAlign = "center";
-        const label = n.device.name || n.device.ieee || "";
+        const label = n.displayName || n.device.name || n.device.ieee || "";
         ctx.fillText(label.length > 18 ? label.slice(0, 17) + "…" : label, n.x, n.y + n.r + 11);
       }
     }
