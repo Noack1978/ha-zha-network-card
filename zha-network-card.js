@@ -11,12 +11,28 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.6.0";
+const CARD_VERSION = "1.6.1";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
 const LQI_GREEN = 192;
 const LQI_YELLOW = 129;
+
+// ZHA reports a device's own NWK address (zha/devices -> nwk) as a plain
+// JSON number, but neighbor and route table NWK fields (neighbor.nwk,
+// route.next_hop, route.dest_nwk) as zigpy's hex-string repr, e.g.
+// "0x1A2B". Both need to be normalized to the same format before they can
+// be compared/looked up against each other.
+function normalizeNwk(value) {
+  if (value === undefined || value === null) return "";
+  const str = String(value).trim();
+  if (/^0x/i.test(str)) {
+    return "0x" + str.slice(2).toUpperCase().padStart(4, "0");
+  }
+  const num = Number(str);
+  if (Number.isNaN(num)) return str.toUpperCase();
+  return "0x" + (num & 0xffff).toString(16).toUpperCase().padStart(4, "0");
+}
 
 function lqiColor(lqi) {
   const v = Number(lqi);
@@ -569,7 +585,7 @@ class ZhaNetworkCard extends HTMLElement {
     const nwkToNode = new Map();
     for (const device of devices) {
       const node = nodeById.get(device.ieee);
-      if (node) nwkToNode.set(String(device.nwk), node);
+      if (node) nwkToNode.set(normalizeNwk(device.nwk), node);
     }
     for (const device of devices) {
       const fromNode = nodeById.get(device.ieee);
@@ -616,7 +632,7 @@ class ZhaNetworkCard extends HTMLElement {
         );
         let linked = false;
         for (const route of activeRoutes) {
-          const nextHopNode = nwkToNode.get(String(route.next_hop));
+          const nextHopNode = nwkToNode.get(normalizeNwk(route.next_hop));
           if (nextHopNode && nextHopNode !== fromNode) {
             addEdge(fromNode, nextHopNode);
             linked = true;
