@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.4.0";
+const CARD_VERSION = "1.5.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -786,34 +786,49 @@ class ZhaNetworkCard extends HTMLElement {
       return;
     }
 
-    ctx.save();
-    ctx.translate(w / 2 + this._offset.x, h / 2 + this._offset.y);
-    ctx.scale(this._scale, this._scale);
-    ctx.translate(-w / 2, -h / 2);
+    const scale = this._scale;
+    // Maps a world-space point (graph coordinates, as produced by _layout)
+    // to screen-space pixels. Zooming only changes each node's *distance*
+    // from the canvas center - node/icon size and label font stay constant
+    // in screen pixels, exactly like the built-in ZHA visualization page
+    // (zooming spreads the mesh out instead of magnifying the symbols).
+    const toScreen = (x, y) => ({
+      x: w / 2 + this._offset.x + scale * (x - w / 2),
+      y: h / 2 + this._offset.y + scale * (y - h / 2),
+    });
+
+    const NODE_FONT_PX = 11;
+    const EDGE_FONT_PX = 9;
 
     // edges
+    ctx.lineWidth = 1.5;
     for (const e of this._edges) {
+      const a = toScreen(e.a.x, e.a.y);
+      const b = toScreen(e.b.x, e.b.y);
       ctx.beginPath();
-      ctx.moveTo(e.a.x, e.a.y);
-      ctx.lineTo(e.b.x, e.b.y);
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
       ctx.strokeStyle = lqiColor(e.lqi);
-      ctx.lineWidth = 1.5;
       ctx.globalAlpha = 0.85;
       ctx.stroke();
       ctx.globalAlpha = 1;
-
-      const mx = (e.a.x + e.b.x) / 2;
-      const my = (e.a.y + e.b.y) / 2;
-      if (this._scale > 0.6) {
-        ctx.fillStyle = "rgba(127,127,127,0.9)";
-        ctx.font = "9px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(String(e.lqi), mx, my);
-      }
+    }
+    ctx.fillStyle = "rgba(127,127,127,0.9)";
+    ctx.font = `${EDGE_FONT_PX}px sans-serif`;
+    ctx.textAlign = "center";
+    for (const e of this._edges) {
+      const a = toScreen(e.a.x, e.a.y);
+      const b = toScreen(e.b.x, e.b.y);
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      if (mx < -20 || mx > w + 20 || my < -20 || my > h + 20) continue;
+      ctx.fillText(String(e.lqi), mx, my);
     }
 
     // nodes
     for (const n of this._nodes) {
+      const p = toScreen(n.x, n.y);
+      if (p.x < -40 || p.x > w + 40 || p.y < -40 || p.y > h + 40) continue;
       const isSelected = this._selected === n;
       const fill =
         n.kind === "coordinator"
@@ -825,19 +840,19 @@ class ZhaNetworkCard extends HTMLElement {
       if (n.kind === "coordinator") {
         const s = n.r;
         ctx.fillStyle = fill;
-        ctx.fillRect(n.x - s, n.y - s, s * 2, s * 2);
+        ctx.fillRect(p.x - s, p.y - s, s * 2, s * 2);
         if (isSelected) {
           ctx.strokeStyle = "#fff";
           ctx.lineWidth = 2;
-          ctx.strokeRect(n.x - s, n.y - s, s * 2, s * 2);
+          ctx.strokeRect(p.x - s, p.y - s, s * 2, s * 2);
         }
       } else if (n.kind === "router") {
-        ctx.ellipse(n.x, n.y, n.r, n.r * 0.78, 0, 0, Math.PI * 2);
+        ctx.ellipse(p.x, p.y, n.r, n.r * 0.78, 0, 0, Math.PI * 2);
         ctx.fillStyle = fill;
         ctx.fill();
         if (isSelected) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
       } else {
-        ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, n.r, 0, Math.PI * 2);
         ctx.fillStyle = fill;
         ctx.fill();
         if (isSelected) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
@@ -845,21 +860,22 @@ class ZhaNetworkCard extends HTMLElement {
 
       if (n.device.available === false) {
         ctx.beginPath();
-        ctx.arc(n.x + n.r * 0.7, n.y - n.r * 0.7, 4, 0, Math.PI * 2);
+        ctx.arc(p.x + n.r * 0.7, p.y - n.r * 0.7, 4, 0, Math.PI * 2);
         ctx.fillStyle = "#d8453a";
         ctx.fill();
       }
-
-      if (this._scale > 0.5) {
-        ctx.fillStyle = "rgba(230,230,230,0.95)";
-        ctx.font = "10px sans-serif";
-        ctx.textAlign = "center";
-        const label = n.displayName || n.device.name || n.device.ieee || "";
-        ctx.fillText(label.length > 18 ? label.slice(0, 17) + "…" : label, n.x, n.y + n.r + 11);
-      }
     }
 
-    ctx.restore();
+    ctx.fillStyle = "rgba(230,230,230,0.95)";
+    ctx.font = `${NODE_FONT_PX}px sans-serif`;
+    ctx.textAlign = "center";
+    for (const n of this._nodes) {
+      const p = toScreen(n.x, n.y);
+      const labelY = p.y + n.r + 11;
+      if (p.x < -40 || p.x > w + 40 || labelY < -10 || labelY > h + 10) continue;
+      const label = n.displayName || n.device.name || n.device.ieee || "";
+      ctx.fillText(label.length > 18 ? label.slice(0, 17) + "…" : label, p.x, labelY);
+    }
   }
 
   static getStubConfig() {
