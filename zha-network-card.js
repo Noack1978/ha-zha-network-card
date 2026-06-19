@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.1.1";
+const CARD_VERSION = "1.2.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -59,7 +59,7 @@ class ZhaNetworkCard extends HTMLElement {
       refresh_interval: config.refresh_interval ?? 60,
       rescan_on_load: config.rescan_on_load ?? false,
       show_end_devices: config.show_end_devices ?? true,
-      height: config.height ?? 480,
+      height: config.height ?? 560,
       ...config,
     };
   }
@@ -309,6 +309,9 @@ class ZhaNetworkCard extends HTMLElement {
     const canvas = this._canvas;
     let panning = false;
     let last = null;
+    const activePointers = new Map();
+    let pinchStartDist = null;
+    let pinchStartScale = 1;
 
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -319,6 +322,18 @@ class ZhaNetworkCard extends HTMLElement {
     }, { passive: false });
 
     canvas.addEventListener("pointerdown", (e) => {
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      canvas.setPointerCapture(e.pointerId);
+
+      if (activePointers.size === 2) {
+        // A second finger landed - switch from pan to pinch-zoom.
+        panning = false;
+        const pts = Array.from(activePointers.values());
+        pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+        pinchStartScale = this._scale;
+        return;
+      }
+
       const hit = this._hitTest(e);
       if (hit) {
         this._selected = hit;
@@ -331,10 +346,21 @@ class ZhaNetworkCard extends HTMLElement {
       }
       panning = true;
       last = { x: e.clientX, y: e.clientY };
-      canvas.setPointerCapture(e.pointerId);
     });
 
     canvas.addEventListener("pointermove", (e) => {
+      if (!activePointers.has(e.pointerId)) return;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (activePointers.size === 2 && pinchStartDist) {
+        const pts = Array.from(activePointers.values());
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+        const newScale = Math.min(3, Math.max(0.3, pinchStartScale * (dist / pinchStartDist)));
+        this._scale = newScale;
+        this._draw();
+        return;
+      }
+
       if (!panning || !last) return;
       const dx = e.clientX - last.x;
       const dy = e.clientY - last.y;
@@ -344,10 +370,17 @@ class ZhaNetworkCard extends HTMLElement {
       this._draw();
     });
 
-    const endPan = () => { panning = false; last = null; };
-    canvas.addEventListener("pointerup", endPan);
-    canvas.addEventListener("pointercancel", endPan);
-    canvas.addEventListener("pointerleave", endPan);
+    const endPointer = (e) => {
+      activePointers.delete(e.pointerId);
+      if (activePointers.size < 2) pinchStartDist = null;
+      if (activePointers.size === 0) {
+        panning = false;
+        last = null;
+      }
+    };
+    canvas.addEventListener("pointerup", endPointer);
+    canvas.addEventListener("pointercancel", endPointer);
+    canvas.addEventListener("pointerleave", endPointer);
   }
 
   _hitTest(e) {
@@ -524,7 +557,7 @@ class ZhaNetworkCard extends HTMLElement {
     const width = Math.max(300, this._cssWidth || 600);
     const height = Math.max(200, this._cssHeight || 400);
     const area = width * height;
-    const k = Math.sqrt(area / Math.max(1, nodes.length)) * 0.9;
+    const k = Math.sqrt(area / Math.max(1, nodes.length)) * 1.7;
 
     // Deterministic-ish starting positions: coordinator centered, others on
     // a circle, so the simulation converges to a stable, repeatable layout.
