@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.0.1";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -91,6 +91,10 @@ class ZhaNetworkCard extends HTMLElement {
       this._refreshTimer = null;
     }
     window.removeEventListener("resize", this._onResize);
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
   }
 
   _startAutoRefresh() {
@@ -242,6 +246,16 @@ class ZhaNetworkCard extends HTMLElement {
 
     this._onResize = () => this._resizeCanvas();
     window.addEventListener("resize", this._onResize);
+
+    // type: sections (and other lazily-laid-out dashboards) often report
+    // 0x0 for the card container on first paint, before the section grid
+    // has settled. A ResizeObserver catches the real size as soon as the
+    // layout stabilizes, instead of relying only on window resize events.
+    if ("ResizeObserver" in window) {
+      this._resizeObserver = new ResizeObserver(() => this._resizeCanvas());
+      this._resizeObserver.observe(this._canvas.parentElement);
+    }
+
     this._resizeCanvas();
     this._attachPointerEvents();
   }
@@ -250,12 +264,24 @@ class ZhaNetworkCard extends HTMLElement {
     if (!this._canvas) return;
     const wrap = this._canvas.parentElement;
     const rect = wrap.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) {
+      // Not laid out yet - try again on the next frame instead of drawing
+      // into a near-zero-size canvas.
+      requestAnimationFrame(() => this._resizeCanvas());
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     this._canvas.width = Math.max(1, rect.width * dpr);
     this._canvas.height = Math.max(1, rect.height * dpr);
     this._ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const sizeChanged = rect.width !== this._cssWidth || rect.height !== this._cssHeight;
     this._cssWidth = rect.width;
     this._cssHeight = rect.height;
+    // If we already had a layout (data was fetched while the canvas was
+    // still 0x0), re-run the force layout now that we know the real size.
+    if (sizeChanged && this._nodes.length) {
+      this._layout();
+    }
     this._draw();
   }
 
