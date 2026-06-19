@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.7.1";
+const CARD_VERSION = "1.7.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -508,12 +508,8 @@ class ZhaNetworkCard extends HTMLElement {
       this._buildGraph(devices || [], friendlyNames);
       this._lastFetch = Date.now();
       const activeCount = this._edges.filter((e) => e.active).length;
-      const routeNote =
-        this._config.link_mode !== "neighbors"
-          ? ` (${this._devicesWithRouteData ?? 0} mit echten Routing-Daten)`
-          : "";
       this._setStatus(
-        `Aktualisiert: ${new Date().toLocaleTimeString()} · ${this._nodes.length} Geräte, ${activeCount} aktive / ${this._edges.length} bekannte Verbindungen${routeNote}`
+        `Aktualisiert: ${new Date().toLocaleTimeString()} · ${this._nodes.length} Geräte, ${activeCount} aktive / ${this._edges.length} bekannte Verbindungen`
       );
     } catch (err) {
       console.error("zha-network-card: failed to load ZHA data", err);
@@ -619,7 +615,6 @@ class ZhaNetworkCard extends HTMLElement {
     // a faint "heard but currently unused" link - so we highlight the real
     // traffic path without ever hiding/losing a known connection.
     const linkMode = this._config.link_mode === "neighbors" ? "neighbors" : "routes";
-    let devicesWithRouteData = 0;
     if (linkMode === "routes") {
       for (const device of devices) {
         const fromNode = nodeById.get(device.ieee);
@@ -627,8 +622,6 @@ class ZhaNetworkCard extends HTMLElement {
         const activeRoutes = (device.routes || []).filter(
           (r) => (r.route_status || "").toUpperCase() === "ACTIVE"
         );
-        if (activeRoutes.length) devicesWithRouteData++;
-        let markedActive = false;
         for (const route of activeRoutes) {
           const nextHopNode = nwkToNode.get(normalizeNwk(route.next_hop));
           if (!nextHopNode || nextHopNode === fromNode) continue;
@@ -642,21 +635,7 @@ class ZhaNetworkCard extends HTMLElement {
             // still visible.
             edgeMap.set(key, { a: fromNode, b: nextHopNode, lqi: 0, active: true });
           }
-          markedActive = true;
           break; // one uplink is enough to mark per device
-        }
-        if (!markedActive) {
-          // No usable routing-table entry for this device at all (common:
-          // many ZHA installs never get Mgmt_Rtg_req answered for every
-          // device, depending on coordinator firmware). Best available
-          // approximation: highlight the strongest-LQI neighbor as its
-          // likely primary/uplink connection.
-          let best = null, bestLqi = -1;
-          for (const e of edgeMap.values()) {
-            if (e.a !== fromNode && e.b !== fromNode) continue;
-            if (e.lqi > bestLqi) { best = e; bestLqi = e.lqi; }
-          }
-          if (best) best.active = true;
         }
       }
     } else {
@@ -668,7 +647,6 @@ class ZhaNetworkCard extends HTMLElement {
     this._nodes = nodes;
     this._edges = Array.from(edgeMap.values());
     this._nodeById = nodeById;
-    this._devicesWithRouteData = devicesWithRouteData;
 
     if (!nodes.length) {
       this._draw();
