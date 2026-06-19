@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -310,8 +310,6 @@ class ZhaNetworkCard extends HTMLElement {
     let panning = false;
     let last = null;
     const activePointers = new Map();
-    let pinchStartDist = null;
-    let pinchStartScale = 1;
 
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -322,17 +320,9 @@ class ZhaNetworkCard extends HTMLElement {
     }, { passive: false });
 
     canvas.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "touch") return;
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       canvas.setPointerCapture(e.pointerId);
-
-      if (activePointers.size === 2) {
-        // A second finger landed - switch from pan to pinch-zoom.
-        panning = false;
-        const pts = Array.from(activePointers.values());
-        pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-        pinchStartScale = this._scale;
-        return;
-      }
 
       const hit = this._hitTest(e);
       if (hit) {
@@ -349,18 +339,7 @@ class ZhaNetworkCard extends HTMLElement {
     });
 
     canvas.addEventListener("pointermove", (e) => {
-      if (!activePointers.has(e.pointerId)) return;
-      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-      if (activePointers.size === 2 && pinchStartDist) {
-        const pts = Array.from(activePointers.values());
-        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-        const newScale = Math.min(3, Math.max(0.3, pinchStartScale * (dist / pinchStartDist)));
-        this._scale = newScale;
-        this._draw();
-        return;
-      }
-
+      if (e.pointerType === "touch") return;
       if (!panning || !last) return;
       const dx = e.clientX - last.x;
       const dy = e.clientY - last.y;
@@ -372,7 +351,6 @@ class ZhaNetworkCard extends HTMLElement {
 
     const endPointer = (e) => {
       activePointers.delete(e.pointerId);
-      if (activePointers.size < 2) pinchStartDist = null;
       if (activePointers.size === 0) {
         panning = false;
         last = null;
@@ -381,6 +359,68 @@ class ZhaNetworkCard extends HTMLElement {
     canvas.addEventListener("pointerup", endPointer);
     canvas.addEventListener("pointercancel", endPointer);
     canvas.addEventListener("pointerleave", endPointer);
+
+    // --- Touch-event fallback for pinch-zoom -------------------------------
+    // Some Android WebViews (incl. the HA Companion App) don't reliably
+    // deliver a second simultaneous Pointer Event stream, so pinch-to-zoom
+    // via pointerdown/pointermove above can silently do nothing. Touch
+    // events expose all active touches directly via e.touches and work
+    // consistently there, so we handle pinch-zoom through them as well.
+    let touchPinchDist = null;
+    let touchPinchScale = 1;
+    let touchPanLast = null;
+
+    const touchDist = (touches) =>
+      Math.hypot(
+        touches[0].clientX - touches[1].clientX,
+        touches[0].clientY - touches[1].clientY
+      );
+
+    canvas.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        touchPinchDist = touchDist(e.touches) || 1;
+        touchPinchScale = this._scale;
+        touchPanLast = null;
+      } else if (e.touches.length === 1) {
+        const hit = this._hitTest(e.touches[0]);
+        if (hit) {
+          this._selected = hit;
+          this._showInfo(hit);
+          this._draw();
+          touchPanLast = null;
+          return;
+        }
+        if (this._selected) {
+          this._closeInfo();
+        }
+        touchPanLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchmove", (e) => {
+      if (e.touches.length === 2 && touchPinchDist) {
+        e.preventDefault();
+        const dist = touchDist(e.touches) || 1;
+        this._scale = Math.min(3, Math.max(0.3, touchPinchScale * (dist / touchPinchDist)));
+        this._draw();
+      } else if (e.touches.length === 1 && touchPanLast) {
+        e.preventDefault();
+        const dx = e.touches[0].clientX - touchPanLast.x;
+        const dy = e.touches[0].clientY - touchPanLast.y;
+        touchPanLast = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        this._offset.x += dx;
+        this._offset.y += dy;
+        this._draw();
+      }
+    }, { passive: false });
+
+    const touchEnd = (e) => {
+      if (e.touches.length < 2) touchPinchDist = null;
+      if (e.touches.length === 0) touchPanLast = null;
+    };
+    canvas.addEventListener("touchend", touchEnd);
+    canvas.addEventListener("touchcancel", touchEnd);
   }
 
   _hitTest(e) {
@@ -557,7 +597,7 @@ class ZhaNetworkCard extends HTMLElement {
     const width = Math.max(300, this._cssWidth || 600);
     const height = Math.max(200, this._cssHeight || 400);
     const area = width * height;
-    const k = Math.sqrt(area / Math.max(1, nodes.length)) * 1.7;
+    const k = Math.sqrt(area / Math.max(1, nodes.length)) * 2.4;
 
     // Deterministic-ish starting positions: coordinator centered, others on
     // a circle, so the simulation converges to a stable, repeatable layout.
@@ -616,6 +656,44 @@ class ZhaNetworkCard extends HTMLElement {
         n.x = Math.min(width - n.r - 4, Math.max(n.r + 4, n.x));
         n.y = Math.min(height - n.r - 4, Math.max(n.r + 4, n.y));
       }
+    }
+
+    this._resolveOverlaps(nodes, width, height);
+  }
+
+  // The force simulation minimizes overlap but, with many hub-connected
+  // nodes (everything talking to one router), some residual overlap is
+  // common. This pass does a few direct separation passes afterwards so
+  // labels stay legible even in dense clusters.
+  _resolveOverlaps(nodes, width, height) {
+    const minGap = 6;
+    for (let pass = 0; pass < 40; pass++) {
+      let moved = false;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          const minDist = a.r + b.r + minGap;
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let dist = Math.hypot(dx, dy);
+          if (dist === 0) { dx = 0.5; dy = 0.5; dist = 0.01; }
+          if (dist < minDist) {
+            const push = (minDist - dist) / 2;
+            dx /= dist; dy /= dist;
+            if (a.kind !== "coordinator") {
+              a.x -= dx * push; a.y -= dy * push;
+            }
+            if (b.kind !== "coordinator") {
+              b.x += dx * push; b.y += dy * push;
+            }
+            moved = true;
+          }
+        }
+      }
+      for (const n of nodes) {
+        n.x = Math.min(width - n.r - 4, Math.max(n.r + 4, n.x));
+        n.y = Math.min(height - n.r - 4, Math.max(n.r + 4, n.y));
+      }
+      if (!moved) break;
     }
   }
 
