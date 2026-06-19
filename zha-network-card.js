@@ -11,7 +11,7 @@
  * https://github.com/Noack1978/ha-zha-network-card
  */
 
-const CARD_VERSION = "1.0.1";
+const CARD_VERSION = "1.0.2";
 
 // LQI thresholds, matching the historic dmulcahey/zha-network-visualization-card
 // convention that Mirko's HA users are already used to.
@@ -181,13 +181,26 @@ class ZhaNetworkCard extends HTMLElement {
           background: var(--card-background-color, #1c1c1c);
           border: 1px solid var(--divider-color, #333);
           border-radius: 8px;
-          padding: 10px 12px;
+          padding: 10px 28px 10px 12px;
           font-size: 0.82em;
           color: var(--primary-text-color);
           box-shadow: 0 2px 6px rgba(0,0,0,0.3);
           display: none;
         }
         .info-box.visible { display: block; }
+        .info-close {
+          position: absolute;
+          top: 4px;
+          right: 6px;
+          background: none;
+          border: none;
+          color: var(--secondary-text-color);
+          font-size: 1.1em;
+          line-height: 1;
+          cursor: pointer;
+          padding: 4px;
+        }
+        .info-close:hover { color: var(--primary-text-color); }
         .info-box .row { display: flex; justify-content: space-between; gap: 12px; margin: 2px 0; }
         .info-box .row b { color: var(--secondary-text-color); font-weight: 400; }
         .info-box .name { font-weight: 600; margin-bottom: 6px; font-size: 1em; }
@@ -220,7 +233,10 @@ class ZhaNetworkCard extends HTMLElement {
         <div class="canvas-wrap">
           <canvas></canvas>
           <div class="status" id="status"></div>
-          <div class="info-box" id="info"></div>
+          <div class="info-box" id="info">
+            <button class="info-close" id="info-close" title="Schließen">×</button>
+            <div id="info-content"></div>
+          </div>
           <div class="legend">
             <span><span class="dot" style="background:#2fb350"></span> LQI &gt; ${LQI_GREEN}</span>
             <span><span class="dot" style="background:#d8a300"></span> LQI ${LQI_YELLOW}-${LQI_GREEN}</span>
@@ -233,7 +249,11 @@ class ZhaNetworkCard extends HTMLElement {
     this._canvas = this.shadowRoot.querySelector("canvas");
     this._ctx = this._canvas.getContext("2d");
     this._statusEl = this.shadowRoot.getElementById("status");
-    this._infoEl = this.shadowRoot.getElementById("info");
+    this._infoBox = this.shadowRoot.getElementById("info");
+    this._infoEl = this.shadowRoot.getElementById("info-content");
+    this.shadowRoot.getElementById("info-close").addEventListener("click", () => {
+      this._closeInfo();
+    });
 
     this.shadowRoot.getElementById("rescan").addEventListener("click", () => {
       this._fetchData(true);
@@ -306,6 +326,9 @@ class ZhaNetworkCard extends HTMLElement {
         this._draw();
         return;
       }
+      if (this._selected) {
+        this._closeInfo();
+      }
       panning = true;
       last = { x: e.clientX, y: e.clientY };
       canvas.setPointerCapture(e.pointerId);
@@ -360,7 +383,13 @@ class ZhaNetworkCard extends HTMLElement {
     this._infoEl.innerHTML =
       `<div class="name">${d.name || d.ieee}</div>` +
       lines.map(([k, v]) => `<div class="row"><b>${k}</b><span>${v}</span></div>`).join("");
-    this._infoEl.classList.add("visible");
+    this._infoBox.classList.add("visible");
+  }
+
+  _closeInfo() {
+    this._selected = null;
+    this._infoBox.classList.remove("visible");
+    this._draw();
   }
 
   async _fetchData(forceRescan) {
